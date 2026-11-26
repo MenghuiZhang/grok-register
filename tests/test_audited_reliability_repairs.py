@@ -21,6 +21,7 @@ from proxy_pool import ProxyPoolManager
 from registration_flow import (
     OUTCOME_UNCERTAIN,
     SAME_LEASE_RECOVERY,
+    STAGE_CODE_RECEIVED,
     STAGE_CODE_SUBMIT,
     STAGE_CODE_WAIT,
     RegistrationCallbacks,
@@ -71,6 +72,7 @@ def _base_ops(fill_code, state=None):
 class AuditedReliabilityRepairTests(unittest.TestCase):
     def test_retry_disposition_distinguishes_code_wait_from_code_submit(self):
         self.assertEqual(registration_retry_disposition(STAGE_CODE_WAIT), SAME_LEASE_RECOVERY)
+        self.assertEqual(registration_retry_disposition(STAGE_CODE_RECEIVED), OUTCOME_UNCERTAIN)
         self.assertEqual(registration_retry_disposition(STAGE_CODE_SUBMIT), OUTCOME_UNCERTAIN)
 
     def test_verification_text_no_longer_triggers_mailbox_retry(self):
@@ -144,6 +146,23 @@ class AuditedReliabilityRepairTests(unittest.TestCase):
         self.assertEqual(result, ("u@example.com", "token"))
         self.assertLess(events.index("persist"), events.index("stage:email_submit"))
         self.assertLess(events.index("stage:email_submit"), events.index("submit-dom"))
+
+    def test_code_is_marked_obtained_before_otp_dom_access(self):
+        stages = []
+
+        class FakePage:
+            def run_js(self, *_args):
+                raise RetryNeeded("OTP DOM temporarily unavailable")
+
+        with patch.object(registration_browser, "page", FakePage()), \
+             patch.object(registration_browser, "get_oai_code", return_value="123456", create=True), \
+             patch.object(registration_browser, "raise_if_cancelled", return_value=None, create=True), \
+             patch.object(registration_browser, "_mark_registration_stage", side_effect=stages.append):
+            with self.assertRaises(RetryNeeded):
+                registration_browser.fill_code_and_submit("u@example.com", "mail-token")
+
+        self.assertEqual(stages[:2], [STAGE_CODE_WAIT, STAGE_CODE_RECEIVED])
+        self.assertNotIn(STAGE_CODE_SUBMIT, stages)
 
     def test_no_button_otp_requires_confirmed_page_transition(self):
         markers = []
